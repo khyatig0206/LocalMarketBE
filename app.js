@@ -6,29 +6,7 @@ const producerRoutes =require("./routes/producerRoutes");
 const categoryRoutes = require("./routes/categoryRoutes")
 const adminRoutes = require("./routes/adminRoutes")
 const app = express();
-const allowedOrigins = [
-  "https://local-market-store-fe.vercel.app", // your frontend domain
-  "http://localhost:5173", // for local dev (optional)
-];
-
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      // allow requests with no origin (like curl or Postman)
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      } else {
-        return callback(new Error("CORS not allowed for this origin"));
-      }
-    },
-    credentials: true,
-  })
-);
-
-// Optional: handle preflight requests globally
-app.options("/*", cors());
-
+app.use(cors());
 app.use(express.json());
 const userRoutes = require("./routes/userRoutes");
 
