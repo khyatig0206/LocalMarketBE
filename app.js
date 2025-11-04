@@ -27,7 +27,7 @@ app.use(
 );
 
 // Optional: handle preflight requests globally
-app.options("*", cors());
+app.options("/*", cors());
 
 app.use(express.json());
 const userRoutes = require("./routes/userRoutes");
