@@ -6,7 +6,12 @@ const producerRoutes =require("./routes/producerRoutes");
 const categoryRoutes = require("./routes/categoryRoutes")
 const adminRoutes = require("./routes/adminRoutes")
 const app = express();
-app.use(cors());
+app.use(
+  cors({
+    origin: "*", // ✅ Allow requests from any origin
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], // optional: specify methods
+  })
+);
 app.use(express.json());
 const userRoutes = require("./routes/userRoutes");
 
