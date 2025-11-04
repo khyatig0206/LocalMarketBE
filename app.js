@@ -1,24 +1,11 @@
 const express = require('express');
 const cors = require('cors');
-const sequelize = require("./config/db");
-const productRoutes = require("./routes/productRoutes");
-const producerRoutes =require("./routes/producerRoutes");
-const categoryRoutes = require("./routes/categoryRoutes")
-const adminRoutes = require("./routes/adminRoutes")
+
 const app = express();
 app.use(cors());
 app.use(express.json());
-const userRoutes = require("./routes/userRoutes");
 
-// For Vercel serverless functions, handle database sync differently
-if (process.env.NODE_ENV !== 'production') {
-  sequelize.sync({ alter: true })
-    .then(() => console.log("✅ Database synced"))
-    .catch((err) => console.error("❌ DB Sync Error:", err));
-} else {
-  // In production, assume the database is already synced
-  console.log("Running in production mode - skipping database sync");
-}
+const sequelize = require("./config/db");
   
 app.use("/api/products", productRoutes);
 app.use("/api/producer", producerRoutes);
@@ -47,6 +34,53 @@ app.use("/api/producer/disputes", producerDisputeRoutes);
 // Search
 const searchRoutes = require("./routes/search");
 app.use("/api/search", searchRoutes);
+
+// Initialize database connection and routes
+(async () => {
+  try {
+    // Test database connection
+    await sequelize.authenticate();
+    console.log('✅ Database connection established');
+
+    // Import routes after database connection
+    const productRoutes = require("./routes/productRoutes");
+    const producerRoutes = require("./routes/producerRoutes");
+    const categoryRoutes = require("./routes/categoryRoutes");
+    const adminRoutes = require("./routes/adminRoutes");
+    const userRoutes = require("./routes/userRoutes");
+    const cartRoutes = require("./routes/cartRoutes");
+    const orderRoutes = require("./routes/orderRoutes");
+    const addressRoutes = require("./routes/addressRoutes");
+    const reviewRoutes = require("./routes/reviewRoutes");
+    const disputeRoutes = require("./routes/disputeRoutes");
+    const producerDisputeRoutes = require("./routes/producerDisputeRoutes");
+    const searchRoutes = require("./routes/search");
+
+    // Use routes
+    app.use("/api/products", productRoutes);
+    app.use("/api/producer", producerRoutes);
+    app.use("/api/categories", categoryRoutes);
+    app.use("/api/admin", adminRoutes);
+    app.use("/api/users", userRoutes);
+    app.use("/api/cart", cartRoutes);
+    app.use("/api/orders", orderRoutes);
+    app.use("/api/addresses", addressRoutes);
+    app.use("/api/reviews", reviewRoutes);
+    app.use("/api/disputes", disputeRoutes);
+    app.use("/api/producer/disputes", producerDisputeRoutes);
+    app.use("/api/search", searchRoutes);
+
+    console.log('✅ Routes loaded successfully');
+  } catch (error) {
+    console.error('❌ Initialization error:', error);
+    process.exit(1);
+  }
+})();
+
+// Health check route
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'OK', message: 'Server is running' });
+});
 
 // Export for Vercel serverless functions
 module.exports = app;
