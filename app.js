@@ -10,9 +10,15 @@ app.use(cors());
 app.use(express.json());
 const userRoutes = require("./routes/userRoutes");
 
-sequelize.sync({ alter: true })
-  .then(() => console.log("✅ Database synced"))
-  .catch((err) => console.error("❌ DB Sync Error:", err));
+// For Vercel serverless functions, handle database sync differently
+if (process.env.NODE_ENV !== 'production') {
+  sequelize.sync({ alter: true })
+    .then(() => console.log("✅ Database synced"))
+    .catch((err) => console.error("❌ DB Sync Error:", err));
+} else {
+  // In production, assume the database is already synced
+  console.log("Running in production mode - skipping database sync");
+}
   
 app.use("/api/products", productRoutes);
 app.use("/api/producer", producerRoutes);
@@ -42,4 +48,11 @@ app.use("/api/producer/disputes", producerDisputeRoutes);
 const searchRoutes = require("./routes/search");
 app.use("/api/search", searchRoutes);
 
+// Export for Vercel serverless functions
 module.exports = app;
+
+// For local development
+if (require.main === module) {
+  const PORT = process.env.PORT || 5000;
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+}
