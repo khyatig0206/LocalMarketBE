@@ -103,11 +103,19 @@ exports.initiateDirectPayment = async (req, res) => {
 exports.placeOrder = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
-    const { addressId } = req.body;
+    const { addressId, paymentMethod } = req.body;
 
     if (!addressId) {
       await transaction.rollback();
       return res.status(400).json({ message: "Address ID is required" });
+    }
+
+    // For PREPAID, return error - must use initiatePayment + verifyPayment flow
+    if (String(paymentMethod || "").toUpperCase() === "PREPAID") {
+      await transaction.rollback();
+      return res.status(400).json({ 
+        message: "For prepaid orders, use initiatePayment endpoint first, then verifyPayment after payment" 
+      });
     }
 
     // Verify address belongs to user and exists
@@ -144,10 +152,11 @@ exports.placeOrder = async (req, res) => {
       total += item.quantity * item.Product.price;
     });
 
+    // Only COD orders reach here
     const order = await Order.create({
       userId: req.user.id,
       total,
-      paymentMethod: (req.body.paymentMethod || "COD"),
+      paymentMethod: "COD",
       paymentStatus: "pending",
       addressId: addressId
     }, { transaction });
@@ -168,55 +177,6 @@ exports.placeOrder = async (req, res) => {
     }
 
     await CartItem.destroy({ where: { cartId: cart.id }, transaction });
-
-    // If PREPAID, create a Razorpay order and return details to client
-    if (String(order.paymentMethod).toUpperCase() === "PREPAID") {
-      const key_id = process.env.RAZORPAY_KEY_ID;
-      const key_secret = process.env.RAZORPAY_KEY_SECRET;
-      if (!key_id || !key_secret) {
-        await transaction.rollback();
-        return res.status(500).json({ message: "Payment gateway not configured" });
-      }
-      const rp = new Razorpay({ key_id, key_secret });
-      const rpOrder = await rp.orders.create({
-        amount: Math.round(Number(order.total) * 100), // in paise
-        currency: "INR",
-        receipt: `ord_${order.id}`,
-        notes: { orderId: String(order.id) }
-      });
-      order.razorpayOrderId = rpOrder.id;
-      await order.save({ transaction });
-      await transaction.commit();
-
-      // Notify each producer involved in this order
-      try {
-        const { ProducerPushToken } = require("../models");
-        const { notifyProducerOrderPlaced } = require("../utils/push");
-        const items = cart.CartItems || [];
-        const byProducer = new Map();
-        for (const it of items) {
-          const pid = it?.Product?.producerId;
-          if (!pid) continue;
-          byProducer.set(pid, (byProducer.get(pid) || 0) + 1);
-        }
-        for (const [pid, count] of byProducer.entries()) {
-          const rows = await ProducerPushToken.findAll({ where: { producerId: pid }, attributes: ['token'], raw: true });
-          const tokens = rows.map(r => r.token);
-          if (tokens.length) await notifyProducerOrderPlaced({ tokens, orderId: order.id, itemsCount: count });
-        }
-      } catch (e) {
-        console.warn('[push] order placed notify error (prepaid):', e.message);
-      }
-
-      return res.status(201).json({
-        message: "Order created, proceed to payment",
-        orderId: order.id,
-        razorpayOrderId: rpOrder.id,
-        amount: rpOrder.amount,
-        currency: rpOrder.currency,
-        keyId: key_id
-      });
-    }
 
     await transaction.commit();
 
@@ -268,11 +228,19 @@ exports.getOrders = async (req, res) => {
 exports.placeDirectOrder = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
-    const { productId, quantity, addressId } = req.body;
+    const { productId, quantity, addressId, paymentMethod } = req.body;
 
     if (!productId || !quantity || !addressId) {
       await transaction.rollback();
       return res.status(400).json({ message: "productId, quantity, and addressId are required" });
+    }
+
+    // For PREPAID, return error - must use initiateDirectPayment + verifyDirectPayment flow
+    if (String(paymentMethod || "").toUpperCase() === "PREPAID") {
+      await transaction.rollback();
+      return res.status(400).json({ 
+        message: "For prepaid orders, use initiateDirectPayment endpoint first, then verifyDirectPayment after payment" 
+      });
     }
 
     // Verify address belongs to user and exists
@@ -303,10 +271,11 @@ exports.placeDirectOrder = async (req, res) => {
 
     const total = qty * product.price;
 
+    // Only COD orders reach here
     const order = await Order.create({
       userId: req.user.id,
       total,
-      paymentMethod: (req.body.paymentMethod || "COD"),
+      paymentMethod: "COD",
       paymentStatus: "pending",
       addressId: addressId
     }, { transaction });
@@ -323,49 +292,6 @@ exports.placeDirectOrder = async (req, res) => {
       { inventory: sequelize.literal(`inventory - ${qty}`) },
       { where: { id: productId }, transaction }
     );
-
-    // If PREPAID, create a Razorpay order and return details to client
-    if (String(order.paymentMethod).toUpperCase() === "PREPAID") {
-      const key_id = process.env.RAZORPAY_KEY_ID;
-      const key_secret = process.env.RAZORPAY_KEY_SECRET;
-      if (!key_id || !key_secret) {
-        await transaction.rollback();
-        return res.status(500).json({ message: "Payment gateway not configured" });
-      }
-      const rp = new Razorpay({ key_id, key_secret });
-      const rpOrder = await rp.orders.create({
-        amount: Math.round(Number(order.total) * 100),
-        currency: "INR",
-        receipt: `ord_${order.id}`,
-        notes: { orderId: String(order.id) }
-      });
-      order.razorpayOrderId = rpOrder.id;
-      await order.save({ transaction });
-      await transaction.commit();
-
-      // Notify producer owning this product
-      try {
-        const { ProducerPushToken } = require("../models");
-        const { notifyProducerOrderPlaced } = require("../utils/push");
-        const pid = product.producerId;
-        if (pid) {
-          const rows = await ProducerPushToken.findAll({ where: { producerId: pid }, attributes: ['token'], raw: true });
-          const tokens = rows.map(r => r.token);
-          if (tokens.length) await notifyProducerOrderPlaced({ tokens, orderId: order.id, itemsCount: 1 });
-        }
-      } catch (e) {
-        console.warn('[push] direct order placed notify error (prepaid):', e.message);
-      }
-
-      return res.status(201).json({
-        message: "Order created, proceed to payment",
-        orderId: order.id,
-        razorpayOrderId: rpOrder.id,
-        amount: rpOrder.amount,
-        currency: rpOrder.currency,
-        keyId: key_id
-      });
-    }
 
     await transaction.commit();
 
@@ -725,43 +651,101 @@ await order.save();
 };
 
 /**
- * Verify Razorpay payment and credit producer wallets
- * Body: { orderId, razorpay_order_id, razorpay_payment_id, razorpay_signature }
+ * Verify Razorpay payment and create order with stock reduction for cart-based orders
+ * Body: { addressId, razorpay_order_id, razorpay_payment_id, razorpay_signature }
  */
 exports.verifyPayment = async (req, res) => {
+  const transaction = await sequelize.transaction();
   try {
-    const { orderId, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
-    if (!orderId || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+    const { addressId, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+    if (!addressId || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      await transaction.rollback();
       return res.status(400).json({ message: "Missing payment fields" });
     }
 
-    const order = await Order.findByPk(orderId);
-    if (!order) return res.status(404).json({ message: "Order not found" });
-
     const key_secret = process.env.RAZORPAY_KEY_SECRET;
-    if (!key_secret) return res.status(500).json({ message: "Payment gateway not configured" });
+    if (!key_secret) {
+      await transaction.rollback();
+      return res.status(500).json({ message: "Payment gateway not configured" });
+    }
 
+    // Verify signature
     const body = `${razorpay_order_id}|${razorpay_payment_id}`;
     const expected = crypto.createHmac("sha256", key_secret).update(body).digest("hex");
     if (expected !== razorpay_signature) {
+      await transaction.rollback();
       return res.status(400).json({ message: "Signature verification failed" });
     }
 
-    // Persist razorpay fields and mark paid
-    order.paymentStatus = "paid";
-    order.razorpayOrderId = razorpay_order_id;
-    order.razorpayPaymentId = razorpay_payment_id;
-    order.razorpaySignature = razorpay_signature;
-    await order.save();
+    // Verify address belongs to user
+    const address = await Address.findOne({
+      where: { id: addressId, userId: req.user.id }
+    }, { transaction });
 
-    // Credit producer wallets based on items in this order
-    const items = await OrderItem.findAll({
-      where: { orderId: order.id },
-      include: [{ model: Product }]
+    if (!address) {
+      await transaction.rollback();
+      return res.status(400).json({ message: "Invalid address selected" });
+    }
+
+    // Get cart items
+    const cart = await Cart.findOne({
+      where: { userId: req.user.id },
+      include: [{ model: CartItem, include: [Product] }],
+    }, { transaction });
+
+    if (!cart || !cart.CartItems || cart.CartItems.length === 0) {
+      await transaction.rollback();
+      return res.status(400).json({ message: "Cart is empty" });
+    }
+
+    // Check stock availability again
+    for (const item of cart.CartItems) {
+      if (item.Product.inventory < item.quantity) {
+        await transaction.rollback();
+        return res.status(400).json({
+          message: `Insufficient stock for ${item.Product.title}. Available: ${item.Product.inventory}, Required: ${item.quantity}`
+        });
+      }
+    }
+
+    let total = 0;
+    cart.CartItems.forEach(item => {
+      total += item.quantity * item.Product.price;
     });
 
-    // Sum amounts per producer
-    const credits = new Map(); // producerId -> amount
+    // NOW create the order
+    const order = await Order.create({
+      userId: req.user.id,
+      total,
+      paymentMethod: "PREPAID",
+      paymentStatus: "paid",
+      addressId: addressId,
+      razorpayOrderId: razorpay_order_id,
+      razorpayPaymentId: razorpay_payment_id,
+      razorpaySignature: razorpay_signature
+    }, { transaction });
+
+    // Create order items and reduce stock
+    for (const item of cart.CartItems) {
+      await OrderItem.create({
+        orderId: order.id,
+        productId: item.productId,
+        quantity: item.quantity,
+        price: item.Product.price,
+      }, { transaction });
+
+      await Product.update(
+        { inventory: sequelize.literal(`inventory - ${item.quantity}`) },
+        { where: { id: item.productId }, transaction }
+      );
+    }
+
+    // Clear cart
+    await CartItem.destroy({ where: { cartId: cart.id }, transaction });
+
+    // Credit producer wallets
+    const items = cart.CartItems;
+    const credits = new Map();
     let totalPaid = 0;
     for (const it of items) {
       const producerId = it?.Product?.producerId;
@@ -771,12 +755,11 @@ exports.verifyPayment = async (req, res) => {
       credits.set(producerId, (credits.get(producerId) || 0) + line);
     }
 
-    // Apply credits and create transactions
     for (const [producerId, amount] of credits.entries()) {
-      let wallet = await ProducerWallet.findOne({ where: { producerId } });
-      if (!wallet) wallet = await ProducerWallet.create({ producerId, balance: 0.0 });
+      let wallet = await ProducerWallet.findOne({ where: { producerId } }, { transaction });
+      if (!wallet) wallet = await ProducerWallet.create({ producerId, balance: 0.0 }, { transaction });
       wallet.balance = Number(wallet.balance) + Number(amount);
-      await wallet.save();
+      await wallet.save({ transaction });
 
       await ProducerWalletTransaction.create({
         producerId,
@@ -785,17 +768,168 @@ exports.verifyPayment = async (req, res) => {
         currency: "INR",
         description: `Order #${order.id} payment credit`,
         orderId: order.id
+      }, { transaction });
+    }
+
+    let admin = await AdminWallet.findOne({}, { transaction });
+    if (!admin) admin = await AdminWallet.create({ balance: 0.0 }, { transaction });
+    admin.balance = Number(admin.balance) + Number(totalPaid);
+    await admin.save({ transaction });
+
+    await transaction.commit();
+
+    // Notify producers
+    try {
+      const { ProducerPushToken } = require("../models");
+      const { notifyProducerOrderPlaced } = require("../utils/push");
+      const byProducer = new Map();
+      for (const it of items) {
+        const pid = it?.Product?.producerId;
+        if (!pid) continue;
+        byProducer.set(pid, (byProducer.get(pid) || 0) + 1);
+      }
+      for (const [pid, count] of byProducer.entries()) {
+        const rows = await ProducerPushToken.findAll({ where: { producerId: pid }, attributes: ['token'], raw: true });
+        const tokens = rows.map(r => r.token);
+        if (tokens.length) await notifyProducerOrderPlaced({ tokens, orderId: order.id, itemsCount: count });
+      }
+    } catch (e) {
+      console.warn('[push] order placed notify error (prepaid):', e.message);
+    }
+
+    return res.json({ message: "Payment verified and order placed", orderId: order.id });
+  } catch (err) {
+    await transaction.rollback();
+    console.error("verifyPayment error:", err);
+    return res.status(500).json({ message: "Failed to verify payment" });
+  }
+};
+
+/**
+ * Verify Razorpay payment and create direct order for single product
+ * Body: { productId, quantity, addressId, razorpay_order_id, razorpay_payment_id, razorpay_signature }
+ */
+exports.verifyDirectPayment = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const { productId, quantity, addressId, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+    
+    if (!productId || !quantity || !addressId || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      await transaction.rollback();
+      return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    const key_secret = process.env.RAZORPAY_KEY_SECRET;
+    if (!key_secret) {
+      await transaction.rollback();
+      return res.status(500).json({ message: "Payment gateway not configured" });
+    }
+
+    // Verify signature
+    const body = `${razorpay_order_id}|${razorpay_payment_id}`;
+    const expected = crypto.createHmac("sha256", key_secret).update(body).digest("hex");
+    if (expected !== razorpay_signature) {
+      await transaction.rollback();
+      return res.status(400).json({ message: "Signature verification failed" });
+    }
+
+    // Verify address belongs to user
+    const address = await Address.findOne({
+      where: { id: addressId, userId: req.user.id }
+    }, { transaction });
+
+    if (!address) {
+      await transaction.rollback();
+      return res.status(400).json({ message: "Invalid address selected" });
+    }
+
+    const product = await Product.findByPk(productId, { transaction });
+    if (!product) {
+      await transaction.rollback();
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    const qty = Math.max(1, parseInt(quantity, 10) || 1);
+
+    // Check stock availability
+    if (product.inventory < qty) {
+      await transaction.rollback();
+      return res.status(400).json({
+        message: `Insufficient stock for ${product.title}. Available: ${product.inventory}, Required: ${qty}`
       });
     }
 
-    // Track total flow in AdminWallet (for visibility; actual refunds will debit this)
-    let admin = await AdminWallet.findOne();
-    if (!admin) admin = await AdminWallet.create({ balance: 0.0 });
-    admin.balance = Number(admin.balance) + Number(totalPaid);
-    await admin.save();
+    const total = qty * product.price;
 
-    return res.json({ message: "Payment verified and wallets credited" });
+    // NOW create the order
+    const order = await Order.create({
+      userId: req.user.id,
+      total,
+      paymentMethod: "PREPAID",
+      paymentStatus: "paid",
+      addressId: addressId,
+      razorpayOrderId: razorpay_order_id,
+      razorpayPaymentId: razorpay_payment_id,
+      razorpaySignature: razorpay_signature
+    }, { transaction });
+
+    await OrderItem.create({
+      orderId: order.id,
+      productId: product.id,
+      quantity: qty,
+      price: product.price,
+    }, { transaction });
+
+    // Reduce product stock
+    await Product.update(
+      { inventory: sequelize.literal(`inventory - ${qty}`) },
+      { where: { id: productId }, transaction }
+    );
+
+    // Credit producer wallet
+    const producerId = product.producerId;
+    const amount = total;
+
+    if (producerId) {
+      let wallet = await ProducerWallet.findOne({ where: { producerId } }, { transaction });
+      if (!wallet) wallet = await ProducerWallet.create({ producerId, balance: 0.0 }, { transaction });
+      wallet.balance = Number(wallet.balance) + Number(amount);
+      await wallet.save({ transaction });
+
+      await ProducerWalletTransaction.create({
+        producerId,
+        type: "credit",
+        amount: Number(amount).toFixed(2),
+        currency: "INR",
+        description: `Order #${order.id} payment credit`,
+        orderId: order.id
+      }, { transaction });
+    }
+
+    let admin = await AdminWallet.findOne({}, { transaction });
+    if (!admin) admin = await AdminWallet.create({ balance: 0.0 }, { transaction });
+    admin.balance = Number(admin.balance) + Number(amount);
+    await admin.save({ transaction });
+
+    await transaction.commit();
+
+    // Notify producer
+    try {
+      const { ProducerPushToken } = require("../models");
+      const { notifyProducerOrderPlaced } = require("../utils/push");
+      if (producerId) {
+        const rows = await ProducerPushToken.findAll({ where: { producerId }, attributes: ['token'], raw: true });
+        const tokens = rows.map(r => r.token);
+        if (tokens.length) await notifyProducerOrderPlaced({ tokens, orderId: order.id, itemsCount: 1 });
+      }
+    } catch (e) {
+      console.warn('[push] direct order placed notify error (prepaid):', e.message);
+    }
+
+    return res.json({ message: "Payment verified and order placed", orderId: order.id });
   } catch (err) {
+    await transaction.rollback();
+    console.error("verifyDirectPayment error:", err);
     return res.status(500).json({ message: "Failed to verify payment" });
   }
 };
@@ -849,4 +983,3 @@ exports.getProducerOrderStats = async (req, res) => {
     return res.status(500).json({ message: 'Failed to fetch stats' });
   }
 };
-

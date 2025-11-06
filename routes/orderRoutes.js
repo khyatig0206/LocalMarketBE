@@ -2,14 +2,19 @@ const express = require("express");
 const router = express.Router();
 const { authenticateUser } = require("../middleware/userAuth");
 const { authenticateProducer } = require("../middleware/authmiddleware");
-const { placeOrder, getOrders, placeDirectOrder, getProducerOrders, updateOrderStatus, verifyPayment, getProducerOrderStats } = require("../controllers/orderController");
+const { placeOrder, getOrders, placeDirectOrder, getProducerOrders, updateOrderStatus, verifyPayment, verifyDirectPayment, initiatePayment, initiateDirectPayment, getProducerOrderStats } = require("../controllers/orderController");
 
-router.post("/place", authenticateUser, placeOrder);
-router.post("/direct", authenticateUser, placeDirectOrder);
+// Cart-based order flow
+router.post("/initiate-payment", authenticateUser, initiatePayment); // Step 1: Get Razorpay order for cart
+router.post("/verify", authenticateUser, verifyPayment); // Step 2: Verify payment and create order
+router.post("/place", authenticateUser, placeOrder); // COD orders only
+
+// Direct order flow (Buy Now)
+router.post("/initiate-direct-payment", authenticateUser, initiateDirectPayment); // Step 1: Get Razorpay order for product
+router.post("/verify-direct", authenticateUser, verifyDirectPayment); // Step 2: Verify payment and create order
+router.post("/direct", authenticateUser, placeDirectOrder); // COD orders only
+
 router.get("/my", authenticateUser, getOrders);
-
-// Payment verification webhook-like endpoint (client posts after Razorpay success)
-router.post("/verify", authenticateUser, verifyPayment);
 
 // Producer-side orders (items for products owned by the producer)
 router.get("/producer", authenticateProducer, getProducerOrders);
